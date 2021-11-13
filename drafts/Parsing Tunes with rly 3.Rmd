@@ -76,6 +76,24 @@ library(rly)
 #library(data.tree)
 ```
 
+
+# Test Data
+```{r}
+arpeggios_1 <- "CEG2 CFA2 DGB2"
+
+arpeggios_2 <- "GBD2 GCE2 AD^F2"   # Add a Sharp
+
+arpeggios_3 <- "G_BD2 GC_E2 ADF2"   # Add two flats
+
+arpeggios_4 <- "GBd2 Gce2 Ad^f2"   # Add variation in octaves
+
+arpeggios_5 <- "GBD'2 GC'E'2 AD'^F'2"   # octave modifiers should produce same as last
+
+arpeggios_6 <- "g,b,d2 g,ce2 a,d^f2"   # octave modifiers should produce same as last
+
+```
+
+
 # A Simple Tune Lexer
 A Lexer accepts a stream of text input, and identifies discrete tokens. Each
 token is a molecule of meaning that you may want to interpret further as you 
@@ -90,13 +108,6 @@ now, we only use REGEX expressions.
 
 We start by producing a lexer that can handle a very reduced form of ABC:
 a string of notes,
-
-## Simple Data
-```{r}
-arpeggios <- "CEG2 CFA2 DGB2"
-
-arpeggios_2 <- "GBD2 GCE2 AD^F2"
-```
 
 ## The Lexer
 ABC notes are basically letters indicating pitch names from A to G.  To code
@@ -154,7 +165,7 @@ smalllexer <- rly::lex(SmallLexer)
 We use a parser by feeding it some input (with the `$input()` method) then 
 pulling tokens out one at a time(with the `$token()` method).
 ```{r}
-smalllexer$input(arpeggios)
+smalllexer$input(arpeggios_1)
 while (!is.null(current_token <- smalllexer$token())) {
   print(current_token)
 }
@@ -170,7 +181,7 @@ details of the R6 implementation.  The visible contents are (in order):
 A full list of methods and attributes is accessible because R6 is built on top
 of r environments.  We find methods `$clone()`, `$print()`, and `$toString()`.
 ```{r}
-smalllexer$input(arpeggios)
+smalllexer$input(arpeggios_1)
 (tok <- smalllexer$token())
 ls(tok)
 ```
@@ -226,7 +237,7 @@ lexpos:  Current position in the input string
 Numerous other attributes are used by the lexer internally to manage the
 lexing process.
 
-# A Simple Tune Parser.
+# A Simple Tune Parser
 Next, we build a simple parser to take the output from a lexer and turn in into
 something more useful.  Our goal here is some sort of data structure that can be
 converted into useful forms, such as a data frame of notes or a musicXML file.
@@ -401,47 +412,44 @@ SmallParser <- R6::R6Class("Parser",
     tokens = TOKENS,  # defined above!
     literals = LITERALS,
     # Parsing rules
+    
     p_note_seq = function(doc = 'note_seq : note note_seq
-                                          | spaced_note note_seq
-                                          | note
-                                          | spaced_note', p) {
-      if(p$length() == 2) {
-        p$set(1, list(p$get(2)))
-      } else {
+                                          | spaced_note note_seq', p) {
         p$set(1, append(p$get(3), list(p$get(2)), after = 0))  # probably slow....
-      }
-      # for (item in p$get(1)) {
-      #   cat('\n')
-      #   cat(item[[1]])
-      # }
     },
     
+    p_note_seq_start = function(doc = 'note_seq : note
+                                                | spaced_note', p) {
+        p$set(1, list(p$get(2)))
+    },
     
+    # the following could be folded back int onote, but eventually 
+    # we will want to handle this as a special case too...
     p_spaced_note = function(doc = 'spaced_note : note WHITESPACE', p) {
       p$set(1, p$get(2))
     },
     
-    p_note  = function(doc = 'note : fullpitch
-                                   | fullpitch duration', p) {
-      if(p$length() == 2) {
+    p_note  = function(doc = 'note : fullpitch', p) {
         p$set(1, p$get(2))
-      } else {
+    },
+    
+     p_note_duration  = function(doc = 'note : fullpitch duration', p) {
         note <- p$get(2)
         note$duration <- p$get(3)
         p$set(1, note)
-        
-      }
     },
     
     p_duration = function(doc = 'duration : DURATION', p) {
       p$set(1, strtoi(p$get(2)))
     },
     
-    p_fullpitch = function(doc = 'fullpitch : notename
-                                            | notename OCTAVE_ADJ', p) {
-      if(p$length()== 3) {
-        note <- p$get(3)
-        chars <- p$get(2)
+    p_fullpitch = function(doc = 'fullpitch : notename', p) {
+      p$set(1, p$get(2))   # is this needed?
+    },
+    
+    p_fullpitch_adjust = function(doc = 'fullpitch : notename OCTAVE_ADJ', p) {
+        note <- p$get(2)
+        chars <- p$get(3)
         chars <- strsplit(chars, '')
         octave <- note$octave
         for (n in seq_along(chars)) {
@@ -453,30 +461,27 @@ SmallParser <- R6::R6Class("Parser",
         }
         note$octave <- octave
         p$set(1, note)
-      }
-      p$set(1, p$get(2))   # is this needed?
-      
     },
     
-    p_notename =  function(doc = 'notename : basenote 
-                                            | ACCIDENTAL basenote', p) {
-      if(p$length() == 3) {
-        note <- p$get(3)
-        chars <- p$get(2)
-        chars <- strsplit(chars, '')
-        accidental <- note$accidental
-        for (n in seq_along(chars)) {
-          if (chars[n] == '^') {
-            accidental = accidental + 1
-          } else if (chars[n] == '_') {
-            accidental = accidental - 1
-          }
-        }
-        note$accidentals <- accidental
-        p$set(1, note)
-      } else {
+    p_notename =  function(doc = 'notename : basenote', p) {
         p$set(1, p$get(2))   # is this needed?
+    },
+    
+    
+    p_notename_accidental =  function(doc = 'notename : ACCIDENTAL basenote', p) {
+      note <- p$get(3)
+      chars <- p$get(2)
+      chars <- strsplit(chars, '')
+      accidental <- note$accidental
+      for (n in seq_along(chars)) {
+        if (chars[n] == '^') {
+          accidental = accidental + 1
+        } else if (chars[n] == '_') {
+          accidental = accidental - 1
+        }
       }
+      note$accidentals <- accidental
+      p$set(1, note)
     },
     
     # we start with basenote, to create a new note data structure, which we modify
@@ -504,15 +509,9 @@ smallparser <- yacc(SmallParser, debug = TRUE)
 
 ```
 
+# Testing the Parser
 ```{r}
-smalllexer$input(arpeggios)
-while (!is.null(tok <- smalllexer$token())) {
-  print(tok)
-}
-```
-
-```{r}
-p <- smallparser$parse(arpeggios, smalllexer)
+p <- smallparser$parse(arpeggios_1, smalllexer)
 p
 
 ```
@@ -522,8 +521,16 @@ we have to unclass the note objects. (Alternatively, we could define an
 `as.data.frame.note()` function that does that for us).
 
 ```{r}
-df <- do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
-df
+do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
+```
+
+Or  Flatten the list of notes to a vector representation of the strings, and show it.
+```{r}
+v <- vector(length = length(p))
+for (n in seq_along(p)) {
+  cat(format(p[[n]]))
+  cat('\n')
+}
 ```
 
 ```{r}
@@ -531,15 +538,25 @@ p <- smallparser$parse(arpeggios_2, smalllexer)
 do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
 ```
 
-
-
 ```{r}
-smalllexer$input('B2c^2d4')
-while (!is.null(tok <- smalllexer$token())) {
-  print(tok)
-}
+p <- smallparser$parse(arpeggios_3, smalllexer)
+do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
 ```
 
+```{r}
+p <- smallparser$parse(arpeggios_4, smalllexer)
+do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
+```
+
+```{r}
+p <- smallparser$parse(arpeggios_5, smalllexer)
+do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
+```
+
+```{r}
+p <- smallparser$parse(arpeggios_6, smalllexer)
+do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
+```
 
 
 
@@ -563,7 +580,6 @@ https://coolbutuseless.bitbucket.io/2018/03/26/parsing-data-part-1.-the-minilexe
 
 # R Packages that simplify Tree Data Structires
 https://cran.r-project.org/web/packages/data.tree/vignettes/data.tree.html
-
 
 
 # A Formal Grammear 
