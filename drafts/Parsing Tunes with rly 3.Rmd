@@ -1,20 +1,33 @@
 ---
 title: "Parsing ABC Tunes with `rly`"
-output: html_notebook
+author: "Curtis C. Bohlen"
+date: "11/14/2021"
+output:
+  github_document:
+    toc: true
+    fig_width: 5
+    fig_height: 4
 ---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
 
 # Introduction
 In this notebook, I explore the R parsing engine `rly`.  `rly` is a port to R of 
-a python package, `ply`. the name `ply` implies "python lex and yacc", where
+a python package, `ply`. The name `ply` implies "python lex and yacc", where
 "lex" and "yacc" are classic UNIX tools for building formal parsers. 
 
-The challenge here is that because of the complex history of `rly`, `ply`, 
-"lex" and "yacc", there are layers and layers of useage that are not clearly
-explained in available documentation for `rly`, and few examples.  Instead,
-we need to figure out `rly` indirectly, by understanding `ply`. 
+Unfortunately, the documentation for `rly` is sparse, and there are few examples
+available on-line, so it takes some time to understand how to work with the
+package.  One can get some idea of how everything works by digging into the
+package's precursors, especially `ply`, "lex" and "yacc", which are better
+documented, but details of usage in R are often implied, not clearly explained.
 
-This Notebook documents "lessons learned" while building up to a 
-full-fledged parsing system for ABC files.
+This Notebook documents "lessons learned" by developing simplified parsers for
+reading simplified ABC music files.
 
 ## The Structure of `rly`  
 The package `rly`, as an R implementation of "lex" and "yacc", provides tools
@@ -23,11 +36,11 @@ for implementing both a "lexer" and a "parser".
 You construct a lexer by calling the function `rly::`lex()`.  You create a 
 parser by calling the function `rly::yacc()`.
 
-To parse an input string, you apply the lexer and the parser to the
-input.
+To parse an input string, you apply the lexer and the parser you just produced
+to the input.
 
 ## R6 Classes and `rly`
-THE package is built in R via the R6 object oriented system (see Chapter 14 of
+The package is built in R via the R6 object oriented system (see Chapter 14 of
 Hadley Wickham's *Advanced R* for a primer on this flavor of object oriented
 programming in R).
 
@@ -81,6 +94,8 @@ a string of notes,
 ## Simple Data
 ```{r}
 arpeggios <- "CEG2 CFA2 DGB2"
+
+arpeggios_2 <- "GBD2 GCE2 AD^F2"
 ```
 
 ## The Lexer
@@ -136,7 +151,7 @@ smalllexer <- rly::lex(SmallLexer)
 ```
 
 
-We use a parser4 by feeding it some input (with the `$input()` method) then 
+We use a parser by feeding it some input (with the `$input()` method) then 
 pulling tokens out one at a time(with the `$token()` method).
 ```{r}
 smalllexer$input(arpeggios)
@@ -161,7 +176,8 @@ ls(tok)
 ```
 Attributes are accessible too.  The ones shown in the display, which are the 
 ones most users may want to manipulate, are accessible via attributes `$type`, 
-`value`, `lexpos`, and `lineno`. But there is no error checking....
+`value`, `lexpos`, and `lineno`. But there is no error checking, so you can
+easily generate a meaningless token.
 
 ```{r}
 tok$lineno <- 7
@@ -169,16 +185,18 @@ tok$lexpos <- 17
 tok$type = 'SLOPPY!'
 tok
 ```
+
+Two members of the class that LOOK useful are often NULL.  presumably, these are 
+only instantiated during actual lexing or parsing.  Not sure howe that magic is 
+accpmplished.
 ```{r}
 tok$lexer
 tok$parser
 ```
 
 ## What's in a Lexer?
-
 We use a little introspection to understand the structure of a Lexer, created 
-from a Lexer Generator, with the function 
-`lex()`.
+from a Lexer Generator, with the function `lex()`.
 
 ### Methods
 According to the man pages for `rly::Lexer`, each lexer only has a few
@@ -191,13 +209,13 @@ token() - Get the next token
 clone() - Clone the lexer (shallow clone by default)
 
 We've seen how to use both `input()` and `token()` already.  `clone()` makes
-a copy of the Lexer.  I'm not sure why you would want to do that in normal 
-programming practice, since you can reuse a lexer fairly effortlessly.
+a copy of the Lexer.  Since you can reuse a lexer simply, the clone method
+is likely most useful if you want to copy and modify an existing lexer.
 
-There are actually a few more methods, but they are not intended for external
-use.
+There are actually a few more methods visible via introspection, but they are
+not intended for external use.
 
-### Attributes
+### Members
 The Man pages suggest only a couple of the attributes of a Lexer are intended 
 for public use:
 
@@ -210,11 +228,17 @@ lexing process.
 
 # A Simple Tune Parser.
 Next, we build a simple parser to take the output from a lexer and turn in into
-something more useful.  Our goal here is a data frame of notes with 
-accidentals, pitch name, octave, and duration.
+something more useful.  Our goal here is some sort of data structure that can be
+converted into useful forms, such as a data frame of notes or a musicXML file.
+Here we focus on generating a list of notes, where a note contains complete pitch 
+and duration information.
 
-The general steps are similar: we have to define the structure of a parser with
-a combination of tokens, literals, and parsing fnctions, defined by formal grammar.
+The general steps are similar to how we produced a lexer: we have to define the
+structure of a parser with a combination of tokens, literals, and parsing
+functions, defined by formal grammar.
+
+(The notion of a formal language, and the many flavors of parsers are well
+beyond the scope of this Notebook.)
 
 The rules of the parser here take on a form that was inherited from
 the original `yacc` program, and redefined in python's `ply`.
@@ -223,34 +247,35 @@ Each rule combines a grammar rule that expresses how to combine tokens,
 with code (in R) that is run each time that particular rule is invoked
 during parsing.
 
-The rules are embodied in a function with names that start with 'p_'. Each
-function must contain a parameter `doc`, with a  default string that defines 
-the parsing rule. The function also takes a second argument, conventionally 
-named `p`. The body of the function is the action to take when that rule is
-invoked. (The name "doc" derives from the Python implementation, which located 
-the parsing rules in the "docstring" associated with each function.)
+The rules are embodied in functions with names that start with 'p_'. Each
+function must contain a parameter `doc`, with a  default string that defines the
+parsing rule. The function also takes a second argument, conventionally named
+`p`. The body of the function is the action to take (usually to modify p) when
+that rule is invoked. (The name "doc" derives from the Python implementation,
+which located  the parsing rules in the "docstring" associated with each
+function.)
 
 The function parameter `p` represents a "YaccProduction" R6 object.
-Documentation on the nature of this object is  sparse.
-The class is a wrapper around the objects actually passed to each grammar rule.
-Index lookup and assignment access the .value attribute of the underlying
-object.  Subscripts step through the symbols in the grammar definition.
+Documentation on the nature of this object is sparse. The class is a wrapper
+around the objects actually passed to each grammar rule.
 
 The primary responsibility of each function is to transform the values of P,
-which are then passed on to the next function, and so on.  If the input string
-is successfully parsed, the parser returns the final value of p -- presumably 
-some sort of useful data structure in our case.
+which are then passed on to the next step in the parser, and so on.  If the
+input string is successfully parsed, the parser returns the final value of p,
+usually some sort of useful data structure.
 
-Each function can, in principal, alter external data structures, set flags, etc.
+Each function can, in principal, also alter external data structures, set flags, 
+etc.  That may be useful to alter behavior of the parser, store
+variable names, etc.
 
 ## A `note` Class
-We want a consistent interface to some underlying data types here, most 
-important is the concept of a NOTE, which consists of the combination 
-of accidentals, a note name, an octave specification, and a duration.
+We want a consistent interface to underlying data types here. Most important is
+the concept of a NOTE, which consists of the combination of accidentals, a note
+name, an octave specification, and a duration.
 
-We could construct a simple R6 class for this purpose, which is quite natural,
-since we are working with R6 classes already, but R6 is not very much in keeping 
-with R idioms.  
+We could construct an R6 class for this purpose, which is quite natural, since
+we are working with R6 classes already, but R6 is not very much in keeping with
+R idioms.
 
 The alternative is to 'build' an S3 class. But S3 "class" is all about method
 dispatch, so what we would need clarity on what methods would simplify 
@@ -259,8 +284,8 @@ coding the parser.
 The main thing we would want for an S3 class would be constructor function, and
 a print function that overrides the default print method for a list. (Hadley
 also recommends a validator function for any S3 class).  We implement
-`print.note()` indirectly, using `validate.note()` and `format.note()`.  That makes
-it slightly easier to use (e.g.) `cat()`.
+`print.note()` indirectly, using `validate.note()` and `format.note()`.  That
+makes it slightly easier to use (e.g.) `cat()`.
 
 ```{r}
 new_note <- function(name, accidentals, octave, duration) {
@@ -338,31 +363,34 @@ accidental = -1
 octave = 4
 duration  = 2
 
-nt <- new_note(name = toupper(char), accidental = accidental, 
+nt <- new_note(name = toupper(char), accidentals = accidental, 
                           octave = octave, duration = duration)
-#validate_note(nt)
 nt
 ```
 
 ## Specifying the Parser
-The Parser specification has a number of quirks that are not clearly laid out in
-the documentation, the most important is how one accesses the object that is
-being passed along the parsing chain.
+The process of creating the parser specification has a number of quirks that are
+not clearly laid out in the documentation.  The most important is how one
+accesses the object that is being passed along the parsing chain.
 
 Each parsing function takes two arguments, `doc`, and `p`. I believe the choice of 
-the name `p` is arbitrary, and may be confusing at times.
+the name `p` is arbitrary.
 
 The object `p` is an R6 object, a "YaccProduction" that acts something like a
 list, except that positional access is not through traditional R subsetting
 using `[` and `[[`, but through `$set()` and $get()` methods.
 
 `$get(1)` and `$set(1,value)` get and set, respectively the first item in the 
-related parsing rule : the single item on the left hand side. Ordinarily, this is the
-RESULT of the parsing step, built as some sort of a function of the items
+related parsing rule : the single item on the left hand side. Ordinarily, this
+is the RESULT of the parsing step, built as some sort of a function of the items
 passed in in the RHS of the parsing rule.
 
+`$get(2)` retrieves the second item counting from left to right -- the first 
+item on the RHS, while `$get(3)` gets the third item, which corresponds to the
+second item on the RHS of the parsing rule, and so on.
+
 `$length()` tells you how many items were in the parsing rule.  We used that
-function a lot in this early code, but the  manual for 'ply', an ancestor to `rly` 
+function a lot in early code, but the  manual for 'ply', an ancestor to `rly` 
 in Python, recommends against this approach.  Separating different length rules 
 cleanly into different rules, rather than combining them with OR, tends to be 
 more efficient.
@@ -433,7 +461,6 @@ SmallParser <- R6::R6Class("Parser",
     p_notename =  function(doc = 'notename : basenote 
                                             | ACCIDENTAL basenote', p) {
       if(p$length() == 3) {
-        print(p$get(2))
         note <- p$get(3)
         chars <- p$get(2)
         chars <- strsplit(chars, '')
@@ -445,7 +472,7 @@ SmallParser <- R6::R6Class("Parser",
             accidental = accidental - 1
           }
         }
-        note$accidental <- accidental
+        note$accidentals <- accidental
         p$set(1, note)
       } else {
         p$set(1, p$get(2))   # is this needed?
@@ -487,15 +514,21 @@ while (!is.null(tok <- smalllexer$token())) {
 ```{r}
 p <- smallparser$parse(arpeggios, smalllexer)
 p
+
 ```
 
+It's not too hard to assemble that into a dataframe.  The only trick is that 
+we have to unclass the note objects. (Alternatively, we could define an 
+`as.data.frame.note()` function that does that for us).
+
 ```{r}
-arpeggios_2 <- "GBD2 GCE2 AD^F2"
+df <- do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
+df
 ```
 
 ```{r}
 p <- smallparser$parse(arpeggios_2, smalllexer)
-p
+do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
 ```
 
 
@@ -507,10 +540,8 @@ while (!is.null(tok <- smalllexer$token())) {
 }
 ```
 
-```{r}
-p <- smallparser$parse('B2c^2D4', smalllexer)
-p
-```
+
+
 
 # Other R Parsing Engines
 Google Searches turn up the following parsers in R.
