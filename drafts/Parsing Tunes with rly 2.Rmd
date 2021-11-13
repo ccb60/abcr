@@ -1,0 +1,713 @@
+---
+title: "Parsing ABC Tunes with `rly`"
+output: html_notebook
+---
+
+# Introduction
+In this notebook, I explore the R parsing engine `rly`.  `rly` is a port to R of 
+a python package, `ply`. the name `ply` implies "python lex and yacc", where
+"lex" and "yacc" are classic UNIX tools for building formal parsers. 
+
+The challenge here is that because of the complex history of `rly`, `ply`, 
+"lex" and "yacc", there are layers and layers of useage that are not clearly
+explained in available documentation for `rly`, and few examples.  Instead,
+we need to figure out `rly` indirectly, by understanding `ply`. 
+
+This Notebook documents "lessons learned" while building up to a 
+full-fledged parsing system for ABC files.
+
+## The Structure of `rly`  
+The package `rly`, as an R implementation of "lex" and "yacc", provides tools
+for implementing both a "lexer" and a "parser". 
+
+You construct a lexer by calling the function `rly::`lex()`.  You create a 
+parser by calling the function `rly::yacc()`.
+
+To parse an input string, you apply the lexer and the parser to the
+input.
+
+## R6 Classes and `rly`
+THE package is built in R via the R6 object oriented system (see Chapter 14 of
+Hadley Wickham's *Advanced R* for a primer on this flavor of object oriented
+programming in R).
+
+R6 provides a form of object oriented programming that is a lot like python's 
+class-based object oriented programming style.  An R6 Class encapsulates both 
+methods (functions) and attributes (data).
+
+In R6, creating an R6 object occurs in two steps -- just like in python.
+First, you have to create an R6 Generator, then you produce actual R6 objects as 
+instances of the class using that generator.  This is exactly analogous to how
+you generate an object of a specific class in python.  First you define the
+Class, then you instantiate that class by calling the Class constructor.
+
+R6 objects turn up a lot in `rly`.  The user designs lexers and parsers by
+constructing R6 objects to pass to `lex()` and 'yacc()`.  The objects those two
+functions produce are themselves R6 objects, and (at least by default), many of
+the underlying data structures are R6 objects as well.
+
+# Load libraries
+I keep dependencies to a minimum here, so examples can be applicable in more
+settings.  I make light use of the tidyverse for data manipulation, (`dplyr`) 
+and little moree.
+
+The only reason we use the `abcr` package is to access a couple of tune 
+examples.  
+```{r}
+#library(tidyverse)
+#library(dplyr)
+#library(tibble)
+library(abcr)
+#library(stringr)
+library(rly)
+#library(data.tree)
+```
+
+# A Simple Tune Lexer
+A Lexer accepts a stream of text input, and identifies discrete tokens. Each
+token is a molecule of meaning that you may want to interpret further as you 
+parse the text input.
+
+This first lexer takes a string of ABC Notes, with or without white space, and 
+converts it to a sequence of tokens, in order.  Not verty exciting.
+
+Each token is defined either as a literal,  via a REGEX, or via a function.  The
+choice of what to code each way has implications for precedence, but for
+now, we only use REGEX expressions.
+
+We start by producing a lexer that can handle a very reduced form of ABC:
+a string of notes,
+
+## Simple Data
+```{r}
+arpeggios <- "CEG2 CFA2 DGB2"
+```
+
+## The Lexer
+ABC notes are basically letters indicating pitch names from A to G.  To code
+the two octaves beginning with middle C, which correspond to melody lines in a
+lot of folk music, Those letters can be capitalized (Octave 4) or not (octave
+5).  Those bare pitch names can be decorated with other information, especially 
+with one or more leading sharp or flat indicators, one or more trailing octave 
+adjustment indicators, and a following number that indicates the note duration 
+(usually in eighths).
+
+In constructing the R6 object that will produce the parser, we define 
+a list of tokens, a list of literals, and specially-named REGEX strings or 
+functions, each of which begin with a "t-". The order of functions matters.
+Strings caught in earlier REGEX don't get caught by later ones.  Only items
+that "fall through" all prior REGEXes hit `t-error()`.
+```{r}
+TOKENS = c('ACCIDENTAL', 'BASENOTE', 'OCTAVE_ADJ', 'DURATION', 'WHITESPACE')
+LITERALS = c()
+
+SmallLexer <- R6::R6Class("Lexer",
+  public = list(
+    tokens = TOKENS,
+    literals = LITERALS,
+    t_ACCIDENTAL = '[\\^=_]',
+    t_BASENOTE = "[a-gA-G]",
+    t_OCTAVE_ADJ = "[\\',]+",
+    
+    t_DURATION = function(re='\\d+', t) {
+         t$value <- strtoi(t$value)
+         return(t)
+    },
+    t_WHITESPACE = "\\s+",
+    
+    # we Need a Function to Increment Line Numbers, to elp withe fixing errors
+    t_newline = function(re='\\n+|(?:\\n\\r)+', t) {         
+      t$lexer$lineno <- t$lexer$lineno + nchar(t$value)
+      return(NULL)
+    },
+    
+    # define an error function for unrecognized tokens or characters,
+    # here we simply skip to teh next character and try again.
+    t_error = function(t) {
+      cat(sprintf("Illegal character '%s'", t$value[1]))
+      t$lexer$skip(1)
+      return(t)
+    
+    }
+  )
+)
+
+smalllexer <- rly::lex(SmallLexer)
+```
+
+
+We use a parser4 by feeding it some input (with the `$input()` method) then 
+pulling tokens out one at a time(with the `$token()` method).
+```{r}
+smalllexer$input(arpeggios)
+while (!is.null(current_token <- smalllexer$token())) {
+  print(current_token)
+}
+```
+
+Each LexToken is itself an R6 object, with a print method that hides some 
+details of the R6 implementation.  The visible contents are (in order):  
+*  Token TYPE
+*  TOKEN VALUE
+*  Line number (always 1 if you don't manage the line count yourself.)
+*  Position in the source text (NOT character count, but token count).
+
+A full list of methods and attributes is accessible because R6 is built on top
+of r environments.  We find methods `$clone()`, `$print()`, and `$toString()`.
+```{r}
+smalllexer$input(arpeggios)
+(tok <- smalllexer$token())
+ls(tok)
+```
+Attributes are accessible too.  The ones shown in the display, which are the 
+ones most users may want to manipulate, are accessible via attributes `$type`, 
+`value`, `lexpos`, and `lineno`. But there is no error checking....
+
+```{r}
+tok$lineno <- 7
+tok$lexpos <- 17
+tok$type = 'SLOPPY!'
+tok
+```
+```{r}
+tok$lexer
+tok$parser
+```
+
+## What's in a Lexer?
+
+We use a little introspection to understand the structure of a Lexer, created 
+from a Lexer Generator, with the function 
+`lex()`.
+
+### Methods
+According to the man pages for `rly::Lexer`, each lexer only has a few
+public methods. These include:
+
+input() - Store a new string in the lexer
+
+token() - Get the next token
+
+clone() - Clone the lexer (shallow clone by default)
+
+We've seen how to use both `input()` and `token()` already.  `clone()` makes
+a copy of the Lexer.  I'm not sure why you would want to do that in normal 
+programming practice, since you can reuse a lexer fairly effortlessly.
+
+There are actually a few more methods, but they are not intended for external
+use.
+
+### Attributes
+
+The Man pages suggest only a couple of the attributes of a Lexer are intended 
+for public use:
+
+lineno:  Current line number
+
+lexpos:  Current position in the input string
+
+Numerous other attributes are used by the lexer internally to manage the
+lexing process.
+
+# A Simple Tune Parser.
+Next, we build a simple parser to take the output from a lexer and turn in into
+something more useful.  Our goal here is a data frame of notes with 
+accidentals, pitch name, octave, and duration.
+
+The general steps are similar: we have to define the structure of a parser with
+a combination of tokens, literals, and parsing fnctions, defined by formal grammar.
+
+The rules of the parser here take on a form that was inherited from
+the original `yacc` program, and redefined in python's `ply`.
+
+Each rule combines a grammar rule that expresses how to combine tokens,
+with code (in R) that is run each time that particular rule is invoked
+during parsing.
+
+The rules are embodied in a function with names that start with 'p_'. Each
+function must contain a parameter `doc`, with a  default string that defines 
+the parsing rule. The function also takes a second argument, conventionally 
+named `p`. The body of the function is the action to take when that rule is
+invoked. (The name "doc" derives from the Python implementation, which located 
+the parsing rules in the "docstring" associated with each function.)
+
+The function parameter `p` represents a "YaccProduction" R6 object.
+Documentation on the nature of this object is  sparse.
+The class is a wrapper around the objects actually passed to each grammar rule.
+Index lookup and assignment access the .value attribute of the underlying
+object.  Subscripts step through the symbols in the grammar definition.
+
+The primary responsibility of each function is to transform the values of P,
+which are then passed on to the next function, and so on, but each function
+can, in principal, alter external data structures, set flags, etc.
+
+TOKENS = c('ACCIDENTAL', 'PITCH', 'OCTAVE_ADJ', 'DURATION', 'WHITESPACE')
+LITERALS = c()
+
+## A `note` Class
+We want a consistent interface to some underlying data types here, most 
+important is the concept of a NOTE, which consists of the combination 
+of accidentals, a note name, an octave specification, and a duration.
+
+We could construct a simple R6 class for this purpose, which is quite natural,
+since we are working with R6 classes already, but R6 is not very much in keeping 
+with R idioms.  
+
+The alternative is to 'build' an S3 class. But S3 "class" is all about method
+dispatch, so what we would need clarity on what methods would simplify 
+coding the parser.
+
+It looks like the main thing we would want for an
+S3 class would be constructor function, and a print function that overrides
+the default print method for a list. (Hadley also recommends a validator 
+function for any S3 class).
+
+```{r}
+new_note <- function(name, accidentals, octave, duration) {
+  stopifnot(is.character(name) && length(name) == 1)     # Name is a single character
+  stopifnot (grepl('[A-G]', name))
+  
+  stopifnot(is.numeric(accidentals) && accidentals%%1 == 0 && abs(accidentals <= 4))
+  stopifnot(is.numeric(octave) && octave%%1 == 0 && abs(octave -4 <= 5))
+  
+  stopifnot (is.numeric(duration) && duration > 0  && 
+               duration <= 64 )  # may not ALWAYS work, since depends on note length
+  
+  note <- structure(list(name = name,
+                         accidentals = accidentals,
+                         octave = octave,
+                         duration = duration),
+                    class = 'note')
+}
+
+# note that this function does not follow convention of not showing accidentals
+# for shaped or flatted notes in a well-defined key.
+print.note <- function(note) {
+  s_or_f <- sign(note$accidental)
+  if (s_or_f < 0) {
+   acc_str <- paste(rep('b', abs(note$accidental)), collapse = '')
+  } else if (s_or_f > 0) {
+   acc_str <- paste(rep('#', abs(note$accidental)), collapse = '')
+  } else{
+    acc_str <- ''
+  }
+
+  print(paste0(note$name, acc_str, '{', note$octave, '}', note$duration))
+}
+
+```
+
+```{r}
+char = "B"
+accidental = 1
+octave = 4
+duration  = 1
+nt <- new_note(name = toupper(char), accidental = accidental, 
+                          octave = octave, duration = duration)
+nt
+```
+
+```{r}
+SmallParser <- R6::R6Class("Parser",
+  public = list(
+    tokens = TOKENS,  # defined above!
+    literals = LITERALS,
+    # Parsing rules
+    #precedence = list(),   #c('left',???), c('left',???),c('right',???),
+    
+    # dictionary of names
+    #names = new.env(hash=TRUE),  # not sure why this is useful here....
+    
+    
+    p_note_seq = function(doc = 'note_seq : note note_seq
+                                         | note', p) {
+    print(p$get(1))
+    },
+    
+   
+
+    p_note     = function(doc = 'note : fullpitch
+                                      | fullpitch duration', p) {
+      
+                                      },
+    
+    p_duration = function(doc = 'duration : DURATION', p) {
+      
+    },
+    
+    p_fullpitch = function(doc = 'fullpitch : notename
+                                            | notename OCTAVE_ADJ', p) {
+      if(length(p) == 3) {
+        note <- p$get(3)
+        chars <- p$get(2)
+        chars <- strsplit(chars, '')
+        octave <- note$octave
+        for (n in seq_along(chars)) {
+          if (chars[n] == "'") {
+            octave = octave + 1
+          } else if (chars[n] == ',') {
+            octave = octave - 1
+          }
+        }
+        note$octave <- octave
+        p$set(1, note)
+      }
+      p$set(1, p$get(1))   # is this needed?
+    },
+      
+    p_notename =  function(doc = 'notename : basenote 
+                                           | ACCIDENTAL basenote', p) {
+      if(length(p) == 3) {
+        note <- p$get(3)
+        chars <- p$get(2)
+        chars <- strsplit(chars, '')
+        accidental <- note$accidental
+        for (n in seq_along(chars)) {
+          if (chars[n] == '^') {
+            accidental = accidental + 1
+          } else if (chars[n] == '_') {
+            accidental = accidental - 1
+          }
+        }
+        note$accidental <- accidental
+        p$set(1, note)
+      }
+      p$set(1, p$get(1))   # is this needed?
+    },
+
+    # we start with basenote, to create a new note data structure, which we modify
+    # as we add other components to determine true_pitch and pitch duration.
+    p_basenote    = function(doc = 'basenote : BASENOTE', p) {
+        char <- p$get(2)
+        if (char == toupper(char)) {
+          octave <- 4
+        } else {
+          octave <- 5
+        }
+        # create our note data structure
+        p$set(1, new_note(name = toupper(char), accidental = 0, 
+                          octave = octave, duration = 1))
+    },
+    
+        
+    p_whitespace = function(doc = 'whitespace : WHITESPACE', p){
+      
+    },
+    
+    
+    p_error = function(p) {
+      if(is.null(p)) cat("Syntax error at EOF")
+      else           cat(sprintf("Syntax error at '%s'", p$value))
+    }
+  )
+)
+
+smallparser <- yacc(SmallParser, debug = TRUE)
+
+```
+
+```{r}
+smalllexer$input(arpeggios)
+while (!is.null(tok <- smalllexer$token())) {
+  print(tok)
+}
+```
+
+```{r}
+p <- smallparser$parse(arpeggios, smalllexer)
+```
+```{r}
+p
+```
+
+
+# Playing with `lex()`
+
+`lex()` 
+Using `lex()` requires building an R6 module containing key components of the
+lexing engine.  In particular, we need to define the string classes we want to
+identify as meaningful components of the language.  Note that these are the
+components, not their meaning (yet)
+
+It takes a little getting used to to think your way around an R6 object. At 
+base they function more like an encapsulated Python Class.  Here, we
+create a new "Lexer" instance built on some of our key regexes.
+
+```{r}
+TOKENS = c('ACCIDENTAL', 'NOTE', 'OCTAVE_ADJ', 'DURATION', 
+            'FORWARD_RETURN', 'RETURN', 'BARLINE',
+            'WHITESPACE')
+LITERALS = c()
+
+Lexer <- R6::R6Class("Lexer",
+  public = list(
+    tokens = TOKENS,
+    literals = LITERALS,
+    t_ACCIDENTAL = '[\\^=_]',
+    t_NOTE = "[a-gA-G]",
+    t_OCTAVE_ADJ = "[\\',]+",
+    t_DURATION = function(re='\\d+', t) {
+         t$value <- strtoi(t$value)
+         return(t)
+    },
+    t_WHITESPACE = "\\s+",
+    t_FORWARD_RETURN = "\\|:",
+    t_RETURN = ':\\|',
+    t_BARLINE        = "\\||\\|\\]\\[\\|",
+    t_newline = function(re='\\n+', t) {                   # Need a Function to Increment Line NUmbers
+      t$lexer$lineno <- t$lexer$lineno + nchar(t$value)
+      return(NULL)
+    },
+    t_error = function(t) {
+      cat(sprintf("Illegal character '%s'", t$value[1]))
+      t$lexer$skip(1)
+      return(t)
+    
+    }
+  )
+)
+
+lexer <- rly::lex(Lexer)
+```
+
+```{r}
+rights_of_man[8:11]
+lexer$input(rights_of_man[8])
+while (!is.null(current_token <- lexer$token())) {
+  print(current_token)
+}
+```
+
+That's pretty cool, and not hard to implement, once I got familiar with the ABC 
+standard and identified the necessary REGEX codes.
+
+
+
+# Playing with the Lexer
+Now that we have defined the lexer, we can test out strings.
+```{r}
+lexer$input('|:B2c^2D4|')
+while (!is.null(tok <- lexer$token())) {
+  print(tok)
+}
+```
+
+```{r}
+lexer$input('Q2C,2B3')
+while (!is.null(tok <- lexer$token())) {
+  print(tok)
+}
+```
+
+# Feeding Results to a Parser
+I do not really understand the structure of the parser specification, so we are
+experimenting here.
+
+There are many examples online of using the python equivalent to this parser,
+`ply`.  We can figure out more or less how this works by looking at those e
+xamples.
+
+One lesson is that if you want to pass anything on to the next level of the
+parser, you need to do so explicitly by passing a value for p1].
+But in our case, where we want to assemble a data structure, it is not
+immediately obvious how we do THAT.
+```{r}
+TOKENS = c('ACCIDENTAL', 'NOTE', 'DURATION', 
+            'FORWARD_RETURN', 'RETURN', 'BARLINE',
+            'WHITESPACE')
+LITERALS = c()
+
+Parser <- R6::R6Class("Parser",
+  public = list(
+    tokens = TOKENS,
+    literals = LITERALS,
+    # Parsing rules
+    precedence = list(),   #c('left',???), c('left',???),c('right',???),
+    
+    # dictionary of names
+    names = new.env(hash=TRUE),
+    
+    
+    # The rules here take on a unique form, that was inherited from
+    # the original `yacc` program in C.
+    # `doc` is an grammar rule.  What follows is an action to take each time a 
+    #  rule is recognized.
+    # P represents a "YaccProduction R6"? Documentation is sparse, so you
+    # need to figure things out by introspection.
+    
+    p_tune      = function(doc = 'tune : measure
+                                       | measure tune', p) {
+    },
+    
+    # We define measures as a sequence of notes ending with a barline
+    # That means we create a "mythical" first measure if the music starts
+    # without a pickup, but we can live with that.
+    # We may even be able to define a pickup measure....
+    p_measure   = function(doc = 'measure : note_seq RETURN 
+                                        | note_seq BARLINE
+                                        | FORWARD_RETURN
+                                        | BARLINE', p) {
+      lngth <- p$length()
+      if (lngth == 1) {
+        p$set(1, p$get(2))
+      } else {
+        p$set(1, paste0(p$get(2), '_', p$get(2)))
+      }
+      
+      cat('\nmeasure\n')
+      cat(p$value)
+      cat('\n')
+      
+    },
+    
+    p_note_seq = function(doc = 'note_seq : note note_seq
+                                          | note',p) {
+      cat('\nnote sequence\n') 
+      cat(p$value)
+      cat('\n')
+      
+      lngth <- p$length()
+      if (lngth == 1) {
+        p$set(1, p$get(2))
+      } else {
+        p$set(1, paste(p$get(2), p$get(2)))
+      }
+    },
+    
+    
+    p_note     = function(doc = 'note : pitch
+                                      | pitch duration', p) {
+      
+                                      }
+    
+    
+    p_duration = function(doc = 'duration = DURATION')
+    
+    p_pitch    = function(doc = 'pitch : NOTE
+                                       | NOTE OCTAVE_ADJ
+                                       | ACCIDENTAL NOTE 
+                                       | ACCIDENTAL NOTE  OCTAVE_ADJ', p) {
+      lngth <- p$length()
+      # some of the following could be parsed in the grammar,
+      # making this code a lot simpler...    
+      Note <- p$get(2)
+      
+      if (Note == toupper(Note))
+      {octave <- 4}
+      
+    
+      if (nchar(Note) > 1) {
+        more <- substr(Note,2,nchar(Note))
+      }
+      if (Note == toupper(Note))
+      {octave <- 4}
+      Accidental <- '='
+      Length <- 1
+      if (lngth == 4) {
+        Accidental <- p$get(3)
+        Length <- p$get(4)
+      }
+      if (lngth == 3) {
+        if(p$get(3) %in% c('^', '=', '_]')) {
+          Accidental <- p$get(3)
+          Length <- 1 
+        } else {
+          Accidental <- '='
+          Length <- p$get(3)
+        }
+      }
+      
+      lngth <- p$length()
+      if (lngth == 1) {
+        p$set(1, p$get(2))
+      } else if (lnght == 2) {
+        (p[1] <- paste(p[2], p[3]))
+      } else {
+        (p[1] <- paste(p[2], p[3], p[4]))
+      }
+      cat(' _')
+      cat(Note, Accidental, Length)
+      cat('_ ')
+      
+    },
+    
+    p_error = function(p) {
+      if(is.null(p)) cat("Syntax error at EOF")
+      else           cat(sprintf("Syntax error at '%s'", p$value))
+    }
+  )
+)
+
+parser <- yacc(Parser, debug = TRUE)
+```
+
+
+
+
+
+
+# Load Some Data
+THe
+Note that each tune body (as I drafted them in the abcr package) is a vector of 
+strings.  That may actually NOT be thebest approach for parsing an entire ABC 
+file. Here we paste them back together
+```{r}
+RoM <-paste(rights_of_man[8:11], sep = '', collapse = ' \n')
+TW <- paste(tennessee_wagoner[9:12], sep = '', collapse = ' \n ')
+```
+
+
+
+
+
+```{r}
+print(RoM)
+```
+```{r}
+RoM2 <- "|:GA|B2A2 G2F2|EFGA B2ef|gfed edBd|cBAG A2GA|
+BcAB GAFG|EFGA B2ef|gfed Bgfg|e2 E2 E2:|
+|:ga|babg efga|babg egfe|d^cde fefg|afdf a2gf|
+edef gfga|bgaf gfef|gfed Bgfg|e2 E2 E2:|"
+```
+
+
+
+```{r}
+lexer$input('|:B2c^2d4:|')
+while (!is.null(tok <- lexer$token())) {
+  print(tok)
+}
+```
+
+```{r}
+p <- parser$parse('|:B2c^2D4:|', lexer)
+```
+
+# Other R Parsing Engines
+Google Searches turn up the following parsers in R.
+
+Minimalist regex-based parsing engine -- not so useful for nested 
+grammars.
+Flexo https://github.com/coolbutuseless/flexo
+
+rly package
+https://cran.r-project.org/web/packages/rly/index.html
+formal impelentation of lex and yacc in R.
+
+dparser package
+https://cran.r-project.org/web/packages/dparser/index.html
+
+minilexer package
+https://coolbutuseless.bitbucket.io/2018/03/26/parsing-data-part-1.-the-minilexer-package---a-simple-lexer-in-r/
+
+
+# R Packages that simplify Tree Data Structires
+https://cran.r-project.org/web/packages/data.tree/vignettes/data.tree.html
+
+
+
+# A Formal Grammear 
+Henrik Norbeck, in 1997 released a formal BNF grammar for ABC 1.6.  Although 
+it is slightly out of date, and incomplete, it provides useful insight into
+what is needed to parse a whole ABC file.
+http://web.archive.org/web/20080309023424/http://www.norbeck.nu/abc/abcbnf.htm

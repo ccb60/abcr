@@ -1,0 +1,176 @@
+---
+title: "Reticulate and `music21`"
+output: html_notebook
+---
+
+# Package `music21`
+A R wrapper around python's `music21` package.  Likely to require some 
+finagling to get it to work on correctly on windows.
+The package does not appear on CRAN, so you need to load it from GitHub.
+
+Like some other packages, the plot and view methods depend on the open source 
+package LilyPond.
+
+Running music21 is less than trivial, since the package needs to find both 
+Python and the Python music21 module.
+
+
+# Setting Up a Conda Envrionment
+I set up a conda environment as follows:
+
+```
+>conda create -n music21
+>conda activate music21
+>conda install pip scipy pandas matplotlib spyder
+```
+
+The third line also installs python, and many commonly used python modules. Here
+it is a version of python 3.9, more recent than the 3.7 in my base conda 
+environment.
+
+`music21` includes several other dependencies that are not yet satisfied.  Conda
+documentation suggests installing as many dependencies as possible using
+`conda`, then using `pip` only to install the very last (un conda) pieces. The
+following unsatisfied dependencies were added when I first tried to install
+`music21` into a minimal conda environment. (These may be outdates, since I 
+added spyder to be able to work directly with music21.)
+
+```
+>conda install more-itertools jsonpickle joblib chardet 
+>pip install music21
+```
+That results in just a single unsatisfied dependency other than `music21` 
+installed via `pip`, `webcolors`, which was not available through my standard 
+conda channels.
+
+# Project-Specific Python
+It appears RStudio is setting an envrionment variable behind the 
+scenes.  After some frustration trying to check and set the 'RETICUALTE_PYTHON' 
+environment variable, I figures=d out that although a direct call to 
+`Sys.getenv()` did not show a 'RETICUALTE_PYTHON' variable set, it was somehow
+getting set in the background.  By default, it was being set to the default
+Anaconda installation, where I had not installed the `music21` module, so
+everything failed.
+
+The problem is, if 'RETICUALTE_PYTHON' is set, I can not override the selection
+of envrionments using `reticulate::use_condaenv()` or other tools.
+
+I changed the project Python by specifying it in the "Project Options" 
+dialog, under Python, and selecting the correct conda environment.
+
+# Checking the 'RETICUALTE_PYTHON' variable
+```{r}
+Sys.getenv('RETICUALTE_PYTHON')
+```
+
+# Testing `reticulate`
+```{r}
+library(reticulate)
+```
+
+```{r}
+Sys.getenv('RETICUALTE_PYTHON')
+```
+
+If we don't specify anything, we get the python 3.7 in our base Anaconda
+installation, but since we set the Project Python, python will find the 
+version in the requested conda envrionment
+```{r}
+py_discover_config()
+```
+Note the final note, telling me that DESPITE not finding a 'RETICUALTE_PYTHON'
+environment variable,  the specific Python WAS determined by an environment 
+variable.....  Sigh....
+
+# Running Music21
+We still want to tell `reticulate` where to look for relevant python packages.
+
+```{r}
+use_condaenv("music21", required = TRUE)
+```
+
+```{r}
+library(music21)
+music21
+```
+
+The music21 object stores the python module. It is possible to run any function from 
+it just by using $, treating it as a Reference Class object.
+
+```{r}
+note <- music21$note$Note("C#")
+note
+```
+
+
+But we still have trouble finding lilypond.
+
+Note that some online references suggest the problem may be that python or 
+music21 has trouble with paths with spaces, so we uninstalled and reinstalled 
+it at 
+`C:\LilyPond\usr\bin\lilypond.exe`
+
+
+```{r error = TRUE}
+plot(note)
+```
+
+I have not been able to solve this - -althoug hI have lilyPond loaded, R can't 
+find it.
+
+
+## Changing Environment Variables
+The lilypondPath is often set inappropriately.  Once set in the env variables, 
+however, it is persistent between
+```{r}
+us <- music21$environment$UserSettings()
+us[['lilypondPath']]
+```
+
+But this proves difficult to change in R
+```{r}
+#us[['lilypondPath']] <- 'C:\\LilyPond\\usr\\bin\\lilypond.exe'
+#us[['lilypondPath']]
+```
+ 
+As far as I can tell, the R version of the data is a copy of the Python data
+structure, so we need to alter the Python data structure, as follows:
+```{r}
+py_run_string("import music21")
+py_run_string("import sys")
+py_run_string("modulenames = set(sys.modules) & set(globals())")
+py$modulenames
+```
+
+```{r}
+py_run_string("us2 = music21.environment.UserSettings()")
+py_run_string("us2['lilypondPath'] = r'C:\\LilyPond\\usr\\bin\\lilypond.exe'")
+py_run_string("us2['musicxmlPath'] = r'C:\\Program Files\\MuseScore 3\\bin\\MuseScore3.exe'")
+py_run_string("us2['musescoreDirectPNGPath'] = r'C:\\Program Files\\MuseScore 3\\bin\\MuseScore3.exe'")
+
+```
+
+```{r}
+us <- music21$environment$UserSettings()
+us[['lilypondPath']]
+us[['musicxmlPath']]
+```
+
+
+```{r error = TRUE}
+plot(note)
+```
+
+# At least MuseScore works as a back end!
+An alternate form, bote.show(), pulls in MuseScore to display the note, so
+perhaps the lack of LilyPond in not so great.  Starting up MuseScore, however,
+is fairly slow.
+```{r}
+note$show()
+```
+
+Bun honestly, why not just work with Music21 directly in Python?  That is 
+probably a much more reasonable approach.
+
+Note that under the hood, music21 likes MusicXML format music ata a fai amount.
+

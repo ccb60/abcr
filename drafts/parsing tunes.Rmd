@@ -1,0 +1,740 @@
+---
+title:  "Finding Tunes Within Groups of Lines"
+output: html_notebook
+---
+
+# Introduction
+This Notebook is an extended workbook considering ways to handle parsing the
+primary tune content of ABC music tune bodies. It explores many different 
+approaches to three interrelated issues:
+1.  How to parse ABC input;  
+2.  How to store the results of parsing an ABC tune in R;  
+3.  How to relate ABC tune structures to structure in other music software,
+    especially MIDI and MusicXML. (This last is not for translation, but to
+    enhance understanding of the choices that need to be made to represent music
+    in compact, computer-readable formats.)
+    
+One lesson from poking around in the on-line world of ABC music analysis is that
+most such efforts rely on existing (command-line) ABC tools to convert data from
+one format to another. Indeed, there is little value in replacing those tools in
+R. It may be far easier to wrap widely used python packages or command line
+utilities than start from scratch.
+
+ABC is also fairly obsolete.  It lives on mostly in a few folk music sites,
+where the format has become standard for "quick and dirty" exchange of music
+that lives principally in the aural tradition. As far as I can tell, the ABC
+"Standard" has been frozen since 2011.
+
+The MUsicXML standard is a rich format for music exchange, far beyond my current 
+needs, but there is some value in relying on a well defined xml dialect to 
+capture details of ABC, and parse XML to convert them to R data.
+    
+```{r}
+library(tidyverse)
+library(abcr)
+library(stringr)
+```
+
+# Load Some Data
+```{r}
+(tw_tune <- isolate_tune(tennessee_wagoner, 3))
+```
+
+```{r}
+(rm_tune <- isolate_tune(rights_of_man, 2))
+```
+
+```{r}
+tw_parts <- split_parts(tw_tune)
+(rm_parts <- split_parts(rm_tune))
+
+```
+
+```{r}
+body <- rm_parts$body
+```
+
+Eventually, we will need to separate symbol lines and lyric lines, a problem
+that adds complexity because of ambiguities and alternatives in the ABC 
+standard. The point is moot for these tune examples, since they lack both 
+symbols and lyrics. (Symbol lines begin with 's:' while lyric lines begin
+with 'w:' or 'W:'.)
+
+So, thinking through the tokenizing problem,
+we can identify all strings that consist of letter a:g or A:G, followed by 
+commas or apostrophes (for octave), caret, equals or underscore (for 
+accidentals) or numbers, using regular expressions.
+
+# Base R's REGEX Functions
+grep(pattern, x, ignore.case = FALSE, perl = FALSE, value = FALSE,
+     fixed = FALSE, useBytes = FALSE, invert = FALSE)
+     
+     Returns either a vector containing the index of strings that match or 
+     the strings themselves (if `value == TRUE`).
+     
+grepl(pattern, x, ignore.case = FALSE, perl = FALSE,
+      fixed = FALSE, useBytes = FALSE, invert = FALSE)
+      
+      Returns a logical vector of length equal to X, that is TRUE if
+      a match was found.
+
+The following all come with "g..." variations that apply multiple times to each 
+string
+
+sub(pattern, replacement, x, ignore.case = FALSE, perl = FALSE,
+    fixed = FALSE, useBytes = FALSE)
+    
+    String substitution, using REGEX in `pattern` and optionally some regex 
+    references to capture groups in `replacement`.
+    
+regexpr(pattern, text, ignore.case = FALSE, perl = FALSE,
+        fixed = FALSE, useBytes = FALSE)
+        
+    Returns an integer vector cotinaing positions of match (matches with
+    `gregexpr()`). Attribute `match.length` gives length of the match.
+
+regexec(pattern, text, ignore.case = FALSE, perl = FALSE,
+        fixed = FALSE, useBytes = FALSE)
+
+    If I understand correctly, similar to regexpr(), but returning a list
+    of vectors of match positions, allowing position of capture groups to be 
+    returned as well. (`gregexec()` returns a matrix.  Somewhat confusing....)
+
+The basic regex function in this context is `regexpr()` or it's cousin
+`gregexpr()`.
+
+Base R's REGEX functions do not include functions to extract or split on matches 
+directly. The function `regmatches()` is the closest we get.  Applied to the 
+results of a call to `regexpr()`, it extracts all matched strings.  We would
+have to roll our own split function.  
+
+# REGEX "Flavors"
+One thing that has turned up is that the different string libraries use slightly
+different dialects of regex.  The Base R `regexpr()`functions allow two version,
+a "PCRE" version and a "perl" version.  The REGEX built into the 'stringi` and
+`stringr` libraries are yet another flavor. Details matter. While the
+documentation of each package is fairly good, the on-line "REXEGG" website
+offers overviews of REGEX, including discussion of how major flavors vary.
+
+# REGEX to identify Major Tune Components
+Next, we develop REGEX to identify and extract major tune components.  The  idea
+is that each of these categories can then be parsed, generating a sequence of
+tokens that define the tune.
+
+For each category, we demonstrate that they work on selected tunes of artificial
+strings.  This is hardly comprehensive testing, but it allows us to dissect and
+develop the logic.
+
+## What We Are Looking For
+The structure of one "note" is as follows (according to the ABC standard)
+
+<grace notes><chord symbols><annotations or decorations>
+     <accidentals><note><octave><note length><tie>
+     
+We will (informally) use the term "note" to refer to the combination of 
+<accidentals><note><octave><note length>, which in general will be convenient
+to parse together
+     
+In addition, we need to be able to find slurs, barlines, decorations, etc.
+
+## Whitespace
+Whitespace has meaning in ABC, principally regarding how to organize beaming
+of notes into clusters for printing.  Since our interest is not principally 
+for graphic display, we need not focus on whitespace, but it is easy to capture.
+
+It's not always clear when we need to identify whitespace and when we do not.
+We have to decide if we want to search only for spaces and tabs, or for any
+whitespace character, which may get confusing.  It's also not immediately
+clear how to address multiple white spaces in series.  Here we  identify
+stretches of whitespace, without regard to how many characters of bytes they
+represent.  
+
+```{r}
+body[[3]]
+ln <- body[[3]]
+
+# one or more spaces followed by non whitespace or end of line
+regmatches(ln, gregexpr("\\s+(?=\\S|\\z)", ln, perl = TRUE))
+regmatches("aabbcc dd   '", gregexpr("\\s+(?=\\S|\\z)", "aabbcc dd   '", perl = TRUE))
+
+```
+
+## Grace Notes
+Grace notes consist of sequences of pitches surrounded by curly brackets.
+So what we need is a basic search for brackets. Brackets can not be nested.
+
+Derivation of this REGEX is explained more fully in the search for chords,
+below, where we evaluate ways of isolating delimited content.
+```{r}
+demo <- ' {a2bc}bGDG '
+rx <- regexpr('(?x)      # Allow free mode
+              (?<=\\{)   # Lookback one for a bracket
+              [^\\}]+    # Gather one or more characters that are not a bracket
+              (?=\\})',  # Look ahead one to a bracket.
+              demo, perl = TRUE)
+regmatches(demo, rx)
+```
+
+## Chord Symbols
+Chord symbols are embedded in double quotes.  We can readily identify the NEXT 
+chord symbol
+
+```{r}
+demo <- 'A2Bc "D"dedA "G"BGD2'
+rx <- regexpr('(?x)      # Allow free mode
+              (?<=\\")   # Lookback one for a doublequote
+              [^\\"]+    # Gather one or more characters that are not a quote
+              (?=\\")',  # Look ahead one to a quote
+              demo, perl = TRUE)
+regmatches(demo, rx)
+```
+
+But note that because double quotes are not "polarized", we can not 
+make simple use of that with `gregexpr()` because it does not differentiate
+between open quotes and close quotes. Any sequence of more than two quotes 
+generates unwanted matches, as each quote serves alternately to start or end 
+the quote.
+
+```{r}
+demo <- 'A2Bc "D"dedA "G"BGD2'
+rx <- gregexpr('(?x)      # Allow free mode
+              (?<=")   # Lookback one for a doublequote
+              [^"]+    # Gather one or more characters that are not a quote
+              (?=")',  # Look ahead one to a quote
+              demo, perl = TRUE)
+regmatches(demo, rx)
+```
+The problem is subtle.  Effectively each match moves the search pointer.  The 
+advantage of a look ahead is that it __does not__  move the pointer, but that 
+means when a subsequent search begins, it picks up the closing quote of the 
+prior pair.
+
+The easiest solution captures the quotes, too.  That appears to advance the 
+search counter past the second quote, so it does not get picked up as a first 
+quote as search continues.
+```{r}
+demo <- 'A2Bc "D"dedA "G"BGD2'
+rx <- gregexpr('"[^"]+?"',  
+              demo, perl = TRUE)
+regmatches(demo, rx)
+```
+Note that the QUOTES Are escaped in the R output, making that look odd, but it
+is correct. This code captures both the quotes and their contents, so it would
+require that to be addressed in any subsequent parsing code.
+
+
+## Legal Chord Types
+```{r}
+chord_types  <- tibble::tribble(
+  ~mark,          ~meaning,
+  'm',               'minor',
+  'min',             'minor',
+  'maj',             'major',
+  'dim',             'diminished',
+  'aug',             'augmented',
+  '+',               'augmented',
+  'sus',             'suspended')
+```
+
+In addition, chords can be modified by numbers designating additional chord
+degrees to include, most often 7 or 9 (for seventh and ninth chords), but 
+others also occur.
+
+
+
+
+## Decorations
+### Quick Decorations
+We take a brute force approach to identifying the common decorations in 
+ABC, by generating a tibble containing allowed decoration codes.  Later, we 
+generate a REGEX programmatically that finds these characters.
+Note that o make that work, we need to escape the period, which otherwise is
+going to end up interpreted in REGEX as a wildcard.
+```{r}
+decorations <- tibble::tribble (
+  ~mark, ~meaning,
+  '\\.', 'staccato mark',
+  '~', 'Irish roll',
+  'H', 'fermata',
+  'L', 'accent or emphasis',
+  'M', 'lowermordent',
+  'O', 'coda',
+  'P', 'uppermordent',
+  'S', 'segno',
+  'T', 'trill',
+  'u', 'up-bow',
+  'v', 'down-bow')
+```
+
+```{r}
+rx <- paste0('[', paste(decorations$mark, collapse = ''), ']')
+
+demo = "abcd efga^ .b2 Mb2"
+
+regmatches(demo, gregexpr(rx, demo))
+```
+
+### Information Fields
+Information fields are delineated by exclamation points.  Many are used for
+decorations, although some are used to change state of the parser.
+```{r}
+demo <- '!trill!dcd'
+regmatches(demo, regexpr('(?<=!)[^!]+(?=!)', demo, perl = TRUE))
+```
+
+## Triplets and Other Tuples
+Tuples are delineated by an (unmatched) open parentheses, immediately followed 
+by a decimal digit. They CAN be nested inside slurs, in fact often will be.
+
+More complex cases take the form of  (p:q:r, where q and r could be omitted.
+
+I do not think I can use a regex alone to capture both the tuple and the 
+following notes, although that is not hard to do with programming.
+
+```{r}
+demo  = 'GBBG GAB2 (3BcBAGE FG3 (3:2:3BcBAGE'
+
+rx <- gregexpr('\\([2-9](:(\\d)?:(\\d)?)?',
+              demo, perl = TRUE)
+regmatches(demo, rx)
+```
+
+## Notes
+(Including accidental, note, octave, and note length)
+Here's a basic REGEX to identify legal notes in a simple tune.  I think....
+```{r}
+body[[1]]
+pitches <- gregexpr("[A-Ga-g]{1}[,']{0,5}[\\^=_]?\\/?\\d{0,3}`?", body[[1]])
+regmatches(body[[1]], pitches)
+```
+
+In this simple ABC tune (like many ABC tunes, the tune is fairly spare, omitting
+chords, annotations, etc.) the regex does a nice job of finding distinct notes.
+Note that this gets our notes, but drops all surrounding metadata, like
+barlines, decorations, etc. To get all that, we need a real parser.
+
+
+## Rests
+Neither of my ready tunes include rests, but here's a draft REGEX.
+```{r}
+dummytune <- gsub('B', 'x', body[[1]])
+(rests <- gregexpr("[xXzZ]{1}[0-9]{0,3}", dummytune))
+```
+
+That correctly finds the rests, but pulls them out of context....
+
+## Chord
+Chords are delimited in the tune body with square brackets.  Lets see what we
+can figure out to find chords. After we find them, we will also have to 
+parse the individual notes.
+
+We use a more complex line of music, from Tennessee Wagoner, which includes a 
+couple of chords.
+
+First we search for anything in square brackets This is a bit indirect, but it
+searches first for an opening bracket, then accepts anything that is not an
+opening or closing bracket, then a closing bracket.
+```{r}
+(ln <- tw_parts$body[[3]])
+
+(mtch <- gregexpr("(?x)\\[
+           [^][]*
+         ]", ln, perl = TRUE))    # We need perl = TRUE to allow free mode
+
+# or, more compactly:
+# gregexpr("\\[[^][]*]", ln)
+```
+
+```{r}
+regmatches(ln, mtch)
+```
+
+That may be too liberal, so we search for letters, octave marks, accidental 
+marks, and numbers inside square brackets. 
+
+If we wanted to look only at the contents of the brackets, and not the brackets 
+themselves, we could use look ahead and look behind code.
+```{r}
+mtch <- gregexpr("(?x)
+         (?<=\\[)
+         [A-Ga-g\\,'^=_\\d]*
+         (?=])", ln, perl = TRUE)
+
+regmatches(ln, mtch)
+```
+
+## Slurs
+Slurs are defined by matching parentheses.  Just to complicate things, there
+could be tuples inside a set of slurs, and the ABC standard calls for the 
+possibility that slurs could be nested.
+
+We don't address all those complexities here yet, but this offers a starting
+point.  This captures unnested parentheses
+```{r}
+fake <- 'a2bc^ | (c^ba2)| a2bc^- | c^ba2 |'
+
+slurs <- gregexpr('(?<=\\()[^)]+(?=\\))', fake, perl = TRUE)
+regmatches(fake, slurs)
+```
+
+But chokes on nested parentheses
+```{r}
+fake2 <- 'a2bc^ | (c^(ba2))| a2bc^- | c^ba2 |]'
+slurs <- gregexpr('(?<=\\()[^)]+(?=\\))', fake2, perl = TRUE)
+regmatches(fake2, slurs)
+```
+Again, the best aproach is probably to captrue the parentheses
+
+One can deal with nested parentheses by using recursion/  This captures the 
+whole group, but not the interior parentheses.
+
+```{r}
+fake3 <- "a2bc^ | (c^ba2)| a2bc^- | c^ba2 |  (3abcbc | ((3gab)cb]"
+slurs <- gregexpr('\\((?:[^()]+|(?R))*+\\)', fake2, perl = TRUE)
+regmatches(fake2, slurs)
+```
+
+But it still fails on those irritating triplets
+```{r}
+
+slurs <- gregexpr('\\((?:[^()]+|(?R))*+\\)', fake3, perl = TRUE)
+regmatches(fake3, slurs)
+```
+
+
+We might be better off identifying different barlines with different regex,
+rather than capturing them all at once and 
+
+
+## Bar Lines
+
+The barlines are a bit tricky, because of the possibility of wide lines, 
+signaled by square brackets.  This gets nastier when you look at the possibility
+of variant endings.
+```{r}
+ln <- paste0(body[[1]], ']')
+ln
+barlines <- gregexpr("(?x)
+                     [\\][:\\|]{1,3}   # one two or three of the barline symbols
+                     (?=[^\\][:\\|]|   # a character NOT one of those
+                     \\z)",            # or the end of the line.
+                     ln, perl = TRUE)
+regmatches(ln, barlines)
+```
+Unfortunately, some of the text sequences that will capture are not legal 
+barlines.
+
+There is probably a more compact way of checking to make sure we find only
+legal barline sequences, but I don't know how.... SO I go "brute force" and
+define the allowed marks, then construct a regex programattically to identify 
+them.
+
+The sequence here is important, so we find the entire barline structure, and
+don't get stuck on the standard bar linesm, when one of the more complex lines
+-- especially the repeats -- is called for.
+```{r}
+barlines <- tibble::tribble(
+  ~mark, ~meaning,
+'::',    	'start & end of two repeated sections',
+'\\|:', 	'start of repeated section',
+':\\|', 	'end of repeated section',
+'\\|]', 	'thin-thick double bar line',
+'\\|\\|', 'thin-thin double bar line',
+'\\[\\|', 'thick-thin double bar line',
+'\\|', 	  'bar line'
+)
+```
+
+```{r}
+rx <- paste0('((?:', paste0(barlines$mark, collapse = ')|(?:'), '))')
+rx
+barlines <- gregexpr(rx,            # or the end of the line.
+                     ln, perl = TRUE)
+regmatches(ln, barlines)
+
+```
+
+## Repeats
+Note, we still have a problem -- we might miss the following if they got 
+swallowed by a single barline too.  
+```{r}
+endings <-
+  tibble::tribble(
+    ~mark,    ~meaning,
+    '|1',     'begin first repeat - abbreviated',
+    '|2',     'Second ending - abbreviated',
+    '[1',     'begin first repeat - floating',
+    '[2',     'begin first repeat - floating',
+    ':|[2',   'begin first repeat'
+  )
+```
+
+
+We can find repeats, but this confuses the repeat with the associated 
+barlines....
+```{r}
+(repeats   <- gregexpr("[[|]\\d[,-\\d]*", body[[1]]))  # first, second repeats
+(repeats   <- gregexpr("[[|]\\d[,-\\d]*", tw_parts$body[[2]])) 
+```
+
+## Ties
+Ties are odd -- they appear to be defined in terms of a mark after a note
+that specifieds a tie to the next note of the same pitch. (where pitch is
+defined in terms of accidental, note, and octave.) Ordinarily, the next note 
+will be the tied note, but in some cases -- like a chord -- that may not be the 
+case.
+
+For now, we just find the symbol that indicates the tie, without look behind or 
+look ahead checks.
+```{r}
+(ties <- gregexpr("-", fake))
+```
+
+## Other Items We need to Find
+We also need to look for:   
+1. embedded information fields or directives.  
+2. Comments -- start with %
+3. Assignable symbols
+4. Macros
+
+# Collecting REGEXES 
+For now, we want to simply identify what we are looking at next
+
+But more generally, what we want to do is split into tokens that can themselves
+be further split into tokens, so lets make a list of token REGEXs (The idea is 
+loosely) based on the FLEXO package concept, but without all the extra machinery
+to make it work for arbitrary general REGEXES.
+
+We may need to update some or all of these by being more specific about what is 
+allowed in each grouping match.
+```{r}
+token_finders <- c(
+    whitespace = "\\s+(?=\\S|\\z)",  # for beaming, not pitch sequences
+    # Grouping constructs
+    gracenotes  = '(?<=\\{)[^\\}]+(?=\\})',       #drops the braces themselves
+    harmony     = '(?<=\\")[^\\"]+(?=\\")',
+    slurs       = '(?<=\\()[^)]+(?=\\))',         # Not quite right yet, since 
+                                                  # we need to NOT pick up tuples.
+    decoration  = '(?<=!)[^!]+(?=!)',
+    chords      = "(?<=\\[)[A-Ga-g\\,'^=_\\d]+(?=])",
+    
+    # annotations
+    simple_decoration = paste0('[', 
+                               paste(decorations$mark, collapse = ''), 
+                               ']'),
+    tuple      = '\\([2-9]',
+    tie       = '~',
+    barline = paste0('((?:', paste0(barlines$mark, collapse = ')|(?:'), '))'),
+    
+    note = "[A-Ga-g]{1}[,']{0,5}[\\^=_]?\\/?\\d{0,3}",  # Do we need to add another item for backticks? Spaces?
+    rest = '[xXzZ]\\d{0,3}' ,
+    
+    # We ignore the following (for now).
+    comment = '%[\\w]*$',
+    symbol_line = '^[\\s]*s:.*$',          # allows whitespace at start of line.  IS that alowed?
+    lyrics_line = '^[\\s]*[Ww]:.*$' 
+)
+```
+
+
+# Data Structures
+We need to think about the nature of the data we are capturing.  The structure
+of a SINGLE note consists of the following:
+
+     <accidentals><note><octave><note length>
+
+But a note also represents a position in a measure, or other temporal sequence,
+and could be combined with other notes, e.g. in a single chord or via ties.
+
+MusicXML uses the following structure:
+ 
+ ```
+ <note>
+    <pitch>
+      <step>E</step>
+      <alter>-1</alter>
+      <octave>5</octave>
+    </pitch>
+    <duration>24</duration>      # Number of "steps" based on subdivisions
+    <tie type="start"/>          # could be "stop".
+  </note>
+```
+And it adds a <chord/> tag to each note in a chord after the first.  An alternative might be to wrap a chord entirely in a tag.
+
+MIDI apparently takes a different approach.  The `tuneR` package returns 
+note data from a MIDI source including the following components:
+```
+time       #start time
+length     #length
+track      #track number
+channel    #channel number
+note       #note.  Probably the note number, by semitones, where 60 = middle C
+notename   #notename
+velocity   #note velocity (based on keyboard controller, used for volume)
+```
+
+Looking at the actual midi standard, it's even weirder, since it could be based 
+on starting and ending time relative to the beginning of the tune.
+
+defining a note 
+
+So for each note, we are basically needing to store just a few items
+step / letter
+accidental
+octave
+duration -- perhaps in some fraction or multiple of eighth notes?
+tie 
+
+So, in R, we might consider constructing either as a a list or a structure.
+If a structure, we could offer a "base type" of integer for, perhaps pitch, duration, 
+ It probably makes sense to make it an S3 object, to facilitate printing and
+ displaying
+
+Then within each measure, (or within the tune) we need to keep some sort of a
+position counter.  
+
+# Approach....
+Using `gregex()` returns selected tokens, but we are going to have to 
+reassemble them in sequence. It will probably be easier to step
+through each string one token at a time.  This requires
+either stripping components off, or retaining a position counter.
+
+Either approach requires creating new (sub)strings repeatedly, which could
+be slow.  Selecting the faster aproach may take benchmarking.
+
+We need to loop over a full string, but we won't know a-priori how many tokens 
+we will identify.  We will need a while loop of some sort.
+
+
+# Generating Note Equivalents
+Let's see if we can generate translations between notation styles.  This may 
+simplify some future efforts.
+
+```{r}
+generator <- LETTERS[c(3:7,1,2)]
+for (step in c(6,5,4,2,1)) {
+  generator <- append(generator, paste0(generator[step],"#"), step)
+}
+sharps <- generator
+
+generator <- LETTERS[c(3:7,1,2)]
+for (step in c(7,6,5,3,2)) {
+  generator <- append(generator, paste0(generator[step],"b"), step-1)
+}
+flats <- generator
+
+prelim <- tibble(sharps_base = rep(sharps,8),
+                 flats_base  = rep(flats,8),
+                 octave = rep(0:7, each = 12), 
+                 relative = rep(1:12,8),
+                 octave_marks = rep(c(',,,,', ',,,', ',,', ',', '', '', "'", "''"), 
+                                    each = 12)) %>%
+  mutate(sharps = paste0(sharps_base, octave),
+         flats = paste0(flats_base, octave)
+  )
+
+```
+
+```{r}
+notes <- prelim %>%
+  mutate(midi = 23  + (octave - 1) * 12 + relative,
+         abc_sharps = gsub('\\d', '', sharps),
+         abc_sharps = if_else(grepl('#', abc_sharps), 
+                              paste0('^', abc_sharps),
+                              abc_sharps),
+         abc_sharps = sub('#', '',abc_sharps),
+         abc_sharps = if_else(octave>4, tolower(sharps), abc_sharps),
+         abc_sharps = paste0(abc_sharps, octave_marks),
+
+         abc_flats = gsub('\\d', '', flats),
+         abc_flats = if_else(grepl('b', abc_flats), 
+                              paste0('_', abc_flats),
+                             abc_flats),
+         abc_flats = sub('b', '',abc_flats),
+         abc_flats = if_else(octave>4, tolower(flats), abc_flats),
+         abc_flats = paste0(abc_flats, octave_marks) ) %>%
+  select(-relative, -octave_marks)
+
+notes
+```
+
+That does not include all possible ABC forms, but it includes the definitive
+forms for equal temperment.
+
+
+key insight is that pitch ratios are such that an octave represents a
+doubling of pitches 
+
+
+Or could we do something clever  where we alter the string slightly to make it 
+an expression, and then interpret it in a domain specific language, constructed
+following ideas from Advanced R? 
+
+
+# An online source of tunes from the Session.org
+https://github.com/IraKorshunova/folk-rnn
+https://github.com/IraKorshunova/folk-rnn/tree/master/data
+
+It's slightly out of date, but should do for my needs....
+
+
+# Stringr examples
+Most online examples use the `stringr` package. A little digging shows that it
+is a wrapper around `stringi` which is itself a wrapper around the an 
+underlying C `ICU` regex library. That's a slightly different regex engine
+than used by Base R `regexpr()`. Other string packages (`stringi` and
+`stringb`) can apparently do similar work, perhaps with less overhead..   
+
+```{r}
+library(stringr)
+(str_1 <- str_extract(str, '(?<=\\{).*(?=\\})'))
+```
+`str_split` separates AT a match, omitting whatever matches. To use that for
+splitting notes, we need a zero-length match, which takes some time to figure
+out.  What we need to find is the spot between the end of one note and the 
+start of the next.  In this setting, each note starts with a letter 
+(I think...).
+```{r}
+str_split_fixed(str_1, "(?<=b)", n = 2)
+str_split_fixed(str_1, "(?=b)", n = 2)
+str_split_fixed(str_1, "(?=[a-gA-G][0-9>\\/]{0,4}).", n = 2)
+str_split_fixed(str_1, "(?<=[a-gA-G][0-9>\\/])", n = 2)
+```
+
+We can use `str_split` to create a list of grace notes.
+```{r}
+str_split(str_1, "(?<=[a-gA-G0-9>\\/])(?=[a-gA-G])")
+```
+
+# Wrapper around Base R Functions
+But for our purposes, we might be able to write a few wrappers around the base R
+functions, to remove one dependency for the package.
+```{r}
+parse_grace <- function(str) {
+  selection <- str_extract(str, '(?<=\\{).*(?=\\})')
+  graces <- stringr::str_split(selection, "(?<=[a-gA-G0-9>\\/])(?=[a-gA-G])")
+  return(graces)
+}
+```
+
+```{r}
+parse_grace("{a2bc}")
+```
+
+# R Parsing Engines
+Minimalist regex-based parsing engine -- not so useful for nested 
+grammars.
+Flexo https://github.com/coolbutuseless/flexo
+
+rly package
+https://cran.r-project.org/web/packages/rly/index.html
+formal impelentation of lex and yacc in R.
+
+dparser package
+https://cran.r-project.org/web/packages/dparser/index.html
+
+minilexer package
+https://coolbutuseless.bitbucket.io/2018/03/26/parsing-data-part-1.-the-minilexer-package---a-simple-lexer-in-r/
+
+# R Packages that simplify Tree Data Structires
+https://cran.r-project.org/web/packages/data.tree/vignettes/data.tree.html

@@ -1,0 +1,451 @@
+---
+title: "Exploring Music Packages with R"
+output: html_notebook
+---
+
+# Package `music`
+https://cran.r-project.org/web/packages/music/index.html
+
+This package includes functions for building note, chords, progressions, and 
+scales.  It manages sound by sending wav files to the `audio` package.
+
+```{r}
+library(tidyverse)
+library(music)
+```
+
+
+I found no related vignettes, so we need to work through specific examples.
+
+I start with `playNote()`, since it is likely to be something we want to use 
+regularly.
+
+The duration settings do not appear to work if we set different durations for 
+each note.  While the function signature implies that we could offer multiple
+values here, I fond that that only works if they are all the same, in which case
+we can just as easily use a single 
+```{r}
+playNote(c('A4', 'B4', 'C5'), duration = 2)
+```
+
+
+Note that the data structure implied here splits pitches and durations.
+
+Pitches are described with conventional pitch names, with octaves defined as 
+usual, with C4 = middle c, and A4 = 440 (although that can be changed with a 
+function).  Pitch names are case sensitive,
+
+```{r}
+playNote(c('A4', 'Bb4', 'B4', 'C5', 'C#5'), duration = 2)
+```
+
+WE can play a quasi-tune, but only if all notes are the same duration.
+```{r}
+playNote(c('B4','A4','G4','A4','B4','B4','B4'), duration = 1)
+```
+
+## Building a tune
+Since we can't play a tune directly, we need to  use a loop of 
+some sort, but this does not work terribly well. Sounds run together without 
+`Sys.sleep()`.... But with it you hear clicks and pops, and rythmn is messed up.
+
+```{r}
+mary <- tibble(notes = c('B4','A4','G4','A4','B4','B4','B4','A4','A4','A4','B4','D5','D5'), 
+               durations = c(1,1,1,1,1,1,2,1,1,2,1,1,2))
+
+for(row in seq(1,length(mary$notes))) {
+  playNote(mary$notes[[row]], duration = mary$durations[[row]])
+
+  Sys.sleep(0.75)
+}
+
+```
+
+# Package `audio`
+```{r}
+library(audio)
+```
+Audio is a package that plays sounds.
+```{r}
+play(sin(1:10000/20))
+```
+
+But the documentation is very sparse.  One could potentially assemble a tune 
+directly from sequential sound samples or wave forms, but that would be labor
+intensive.  This is apparently the package that `music` uses to play notes
+and chords.
+
+# Package `tuneR`
+```{r}
+library(tuneR)
+```
+
+Package `tuneR` contains functions to read several music formats(wav mp3 and
+midi, at least) and analyze and manipulate WAV files.  It contains many 
+utilities for manipulating, analyzing, resampling, or displaying WAV files.
+
+It appears to be a favorite for people working with complex sound in R, 
+including birdsong and ambient sounds.
+
+It also allows wav tunes to be converted to text files that can be presented as
+sheet music using music typesetting software LilyPond (open source / GNU
+package).
+
+This introduces yet another music notation system.... The function expects
+notes to be passed as a data frame with four components. Note, duration, 
+punctate, and slur. But the function is considered under development.
+
+```{r}
+noteFromFF(600, diapason = 440, roundshift = 0)
+```
+So, that gives us a note 5 halftones above A
+Formula is this: round(12 * log(x / diapason,2) + roundshift
+
+```{r}
+notenames(c(12, 0,  -12, -24))
+notenames(c(0, 4, 7))
+```
+
+Note that the note annotation looks suspiciously similar to ABC, in terms of
+representing octaves, but not accidentals or duration.
+
+I found a nice examples of using the package for music theory:
+https://www.r-bloggers.com/2011/10/the-psychology-of-music-and-the-%E2%80%98tuner%E2%80%99-package/
+
+It's a bit out of date, but minor tweaks are interesting.
+
+```{r}
+sound <- sine(440, bit = 32)
+ 
+writeWave(sound, '440.wav')
+```
+
+```{r}
+sound <- normalize(bind(sine(440, bit = 32),
+              sine(880, bit = 32),
+              sine(440, bit = 32) + sine(880, bit = 32)))
+
+writeWave(sound, 'octaves.wav')
+```
+
+Note that the author of that blog mantains a github archive for generating
+the frequencies we need to listen to different types of temperament / tunings.
+
+# Package `gm`
+```{r}
+library(gm)
+```
+
+Package `gm` is a package for "generating music" according to a "grammar of
+music". It appears to accomplish several things via a connection with
+MuseScore.  For `show()` in particular, `gm` appears to translate the music
+tMusicXML, then pass that to MuseScore to be rendered.
+
+On the whole, the internal representations used are solid, and the approach to 
+"adding up" music parts may suit our needs.
+
+```{r}
+m <- Music()
+m <- m +
+  # add a 4/4 time signature
+  Meter(4, 4) +
+  # add a musical line of a C5 whole note
+  Line(pitches = list("C5"), durations = list("whole"))
+
+m
+
+```
+The program's ability to generate scores is VERY slow, and scores do not
+appear in the markdown document, but in the plot Viewer.  The following takes 
+perhaps 30 seconds to render a single note.
+```{r}
+show(m, to = c('score'))
+```
+
+Generating audio is even slower.  Again, the output turns up in the viewer, 
+whence the user can play it. Again, you'll wait close to a minute for output 
+to appear.
+```{r}
+show(m, to = c('audio'))
+```
+Note that we can add notes.  I am uncertain what makes the decision to add these 
+as bass clef.
+```{r}
+m <- m + Line(
+  pitches = list("C3", "G3"),
+  durations = list("half", "half")
+)
+
+show(m)
+```
+
+Adding notes as a voice adds them to  a specified line. Note the use 
+of `c()` to specify multiple notes sounding simultaneously.
+
+```{r}
+m <- m + Line(
+  pitches = list(c("E4", "G4"), c("D4", "F4"), c("F4", "A4"), c("E4", "G4")),
+  durations = list("quarter", "quarter", "quarter", "quarter"),
+  as = "voice",
+  to = 1)
+
+show(m)
+```
+
+The underlying data structure is a list of lists, with various nested structures.
+```{r}
+str(m)
+```
+
+The similarity to MusicXML is evident, but not complete.
+
+`gm` uses either pitch names or MIDI pitch numbers.  Names are defined as
+follows:
+
+1.  a tone name (from A to G),  
+2.  an optional accidental (-, --, # or ##), and  
+3.  a number identifying the pitch’s octave (from 0 to 9).  
+
+Durations are principally given by "duration types" like "whole", 'half', and 
+'32nd'. Most words can be abbreviated to first letters.  You can add zero to 
+four dots....  There is special tuplet notation.
+
+The package points to a conversion table between MIDI pitch numbers and names
+defined in this way.  That is, interestingly, in a Wikipedia  article about 
+'Scientific Pitch Notation".
+
+That includes the following useful formulae:
+Mathematically, given the number n of semitones above middle C, the fundamental
+frequency in hertz is given by 440 ⋅ 2^ ( n − 9 ) / 12.  (see twelfth root of two)
+
+$$\displaystyle 440\cdot 2^{(n-9)/12}$$
+
+
+Given the MIDI Note number m, the frequency of the note is normally 
+440 ⋅ 2 ( m − 69 ) / 12
+$$\displaystyle 440\cdot 2^{(m-69)/12}$$
+Hz, using standard tuning. 
+
+# Package `tabr`
+Includes music analysis functions.  The main purpose is "to manipulate musical 
+information in notation form." Includes a music syntax converters from one
+music data representation to another.  Including tools for making tabs and
+export sheet music with LilyPond. Emphasis is on guitar tabs.
+
+```{r}
+library(tabr)
+```
+
+
+A central component is the "noteworthy" string -- a text format for music data.
+These strings have some variations on how they are shown.
+
+```{r}
+x <- "a# b_*2 c, d'' e3*2 g_4 c2e_2g2*2"
+x <- as_noteworthy(x)
+x
+```
+```{r}
+summary(x)
+```
+```{r}
+notes <- "c d e f g a b ceg~ ceg"
+info <- "8*8 1"
+x <- as_music(notes, info)
+x
+```
+```{r}
+summary(x)
+```
+```{r}
+music_split(x)
+```
+
+```{r}
+x <- "a,4*5 b,4- c4 cgc'e'~4 cgc'e'1 e'4 c' g c ce'1"
+musical(x)
+x <- as_music(x)
+x
+```
+
+```{r}
+str(x)
+```
+
+
+
+
+#Package `chorrrds`
+Extracts chords from the Cifraclub website to download and organize music chords.  Cifraclub is a spanish language website that contains information of chords and lyrics for popular music.
+
+The packages primary focus is a handful of functions for analysis of chord progressions.  It includes things like
+chord distance, and chord ngrams.
+
+The underlying data structure is a fairly simple text depiction of chords using standard guitar chord conventions.
+For hte most part, however, the package does not interpret the strings as musical sequences of notes.  It uses '#' for sharps and 'b' for flats.
+```{r}
+library(chorrrds)
+```
+
+
+```{r}
+q <- get_songs('Queen')
+
+chords <- get_chords(q$url[9])
+chords
+```
+
+```{r}
+ng <- chords_ngram(chords, n = 3)
+ng
+```
+
+```{r}
+ng %>%
+  arrange(chords_ngram)
+```
+
+
+# Package `music21`
+A R wrapper around python's `music21` package.  This will require some 
+finagling to get it to work on correctly on windows.
+The package does not appear on CRAN, so you need to load it from GitHub.
+
+Like some other packages, the plot and view methods depend on the open source 
+package LilyPond. Ironically, LilyPond wants its own Python...
+
+Running music21 is less than trivial, since the package needs to find both 
+Python and the Python music21 module.
+
+## Setting Up `reticulate`
+
+I set up a conda environment as follows:
+
+```
+>conda create -n music21
+>conda activate music21
+>conda install pip scipy pandas matplotlib spyder
+```
+
+The third line also installs python, and many commonly used python modules.
+
+`music21` includes several other dependencies that are not yet satisfied.  Conda documentation suggests installing as many dependencies as possible using `conda`, then using `pip` only to install the very last (un conda) pieces. The following unsatisfied dependencies were added when I first tried to install `music21` into a minimal conda environment.
+
+```
+>conda install more-itertools jsonpickle joblib chardet 
+```
+
+That results in just a single unsatisfied dependency other than `music21` 
+installed via `pip`, `webcolors`, which was not available through my standard 
+conda channels.
+
+```
+>pip install music21 webcolors
+```
+
+## Project-Specific Python
+After some frustration trying to check and set the 'RETICUALTE_PYTHON' 
+environment variable, I figured out that although a direct call to 
+`Sys.getenv()` did not show a 'RETICUALTE_PYTHON' variable set, it was somehow
+getting set in the background.  By default, it was being set to the default
+Anaconda installation, where the `music21` module is NOT installed, so
+everything failed.
+
+If 'RETICUALTE_PYTHON' is set, you can not override the selection of python
+versions or environments using `reticulate::use_condaenv()` or other tools.
+
+I changed the project Python by specifying it in the "Project Options" 
+dialog, under Python, in RStudio, and selecting the `correct`music21` conda 
+environment, and everything works.
+
+If you are not using RStudio in Windows, your mileage may vary.
+
+```{r}
+library(reticulate)
+```
+
+```{r}
+Sys.getenv('RETICUALTE_PYTHON')
+```
+
+```{r}
+py_discover_config(use_environment = 'music21')
+```
+
+Note the final note, telling me that DESPITE not finding a 'RETICUALTE_PYTHON'
+environment variable,  the specific Python WAS determined by an environment 
+variable.....  Sigh....
+
+We still want to tell `reticulate` where to look for relevant python packages.
+
+```{r}
+use_condaenv("music21", required = TRUE)
+
+library(music21)
+music21
+```
+
+The music21 object stores the python module. It is possible to run any function from it just by using $, treating it as a Reference Class object.
+
+```{r}
+note <- music21$note$Note("C#")
+note
+```
+
+To plot the note, we also need to tell `music21` where to find the LilyPond
+executable.  I installed this on windows. This is slightly tricky, since it is 
+set back in python land, not R land.
+THe executable is located at:
+
+C:\Program Files (x86)\LilyPond\usr\bin\lilypond.exe
+
+```{r}
+m21 <- import("music21")
+us <- m21$environment$UserSettings()
+us
+```
+
+Note that several of these paths are wonky, being redrawn as relative to the
+home directory of this project.
+
+so far, so good, but I can't actually change those values in R.  What appears 
+to be happening is that we are changing the values in R memory, but when we look 
+at the whole structure  (which mirrors a configuration file) the changes are not
+recorded.
+
+```{r}
+us$lilypondPath <- ""
+us$lilypondPath
+us
+```
+
+So it looks like we have to do the work in Python land. WE then check if it
+worked back in R land.
+
+```{r}
+py_run_string("us2 = m21.environment.UserSettings()")
+py_run_string("us2['lilypondPath'] = 'C:/Program Files (x86)/LilyPond/usr/bin/lilypond.exe'")
+
+
+us <- m21$environment$UserSettings()
+us
+```
+
+```{r}
+py_run_string("print(us2['lilypondPath'])")
+```
+
+```{r}
+note %>% 
+  plot()
+```
+
+
+# r-music on github
+https://github.com/r-music
+provides links to several R music-related packages.  Note clear what the deal is....
+
+
+# MusicXML
+
+

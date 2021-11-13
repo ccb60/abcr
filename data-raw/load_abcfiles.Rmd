@@ -1,0 +1,61 @@
+---
+title: "Load Example ABC data to Text"
+output: html_notebook
+---
+
+
+## code to prepare `DATASET` dataset goes here
+
+```{r}
+library(tidyverse)
+library(rlang)
+```
+
+We assemble a list of file names with  ".abc" in them.  Presumably these are
+ABC music files, with the ".abc' file extension (although we don't test that 
+explicitly).
+```{r}
+parent <- dirname(getwd())
+foldernm<-  'inst/extdata'
+folder <- file.path(parent, foldernm)
+fns <-list.files(folder, ".abc")
+
+examples <- list()
+for (fn in fns) {
+    nm <- substr(fn, 1, nchar(fn)-4)
+    lines <- readLines(file.path(folder, fn), skipNul = TRUE)
+    if(! grepl('^%abc', lines[[1]]))
+       lines <- c('%abc', lines)
+    examples[[nm]] <- lines
+}
+```
+
+We create a small helper function that creates symbols from all named items in 
+a list. This is a little sketchy, since we do minimal error checking.  It also
+does not work well embedded in other calls, since `parent.frame()` then returns 
+the environment of the calling function, not the outer environment.
+```{r}
+make_vars <- function (.lst) {
+  for (nm in names(.lst)) {
+    if (! is.null(nm) && nchar(nm)>0) {
+    assign(nm, .lst[[nm]], envir = parent.frame())
+    }
+  }
+}
+```
+
+We create variables based on the names of the abc files.
+```{r}
+make_vars(examples)
+```
+
+Now, we add them all the the data folder as "*.rda" files.
+The key step here is converting the names (which are strings from the for loop)
+into symbols, which can be passed to `use_data()`.
+```{r}
+for (nm in names(examples)) {
+  nm <- ensym(nm)
+  do.call(usethis::use_data, list(nm, overwrite = TRUE))
+}
+
+```
