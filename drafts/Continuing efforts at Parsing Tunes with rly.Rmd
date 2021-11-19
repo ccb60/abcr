@@ -1,0 +1,287 @@
+---
+title: "Parsing ABC Tunes with `rly`"
+author: "Curtis C. Bohlen"
+date: "11/14/2021"
+output:
+  github_document:
+    toc: true
+    fig_width: 5
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+In this notebook, I explore the R parsing engine `rly`.  `rly` is a port to R of 
+a python package, `ply`. The name `ply` implies "python lex and yacc", where
+"lex" and "yacc" are classic UNIX tools for building formal parsers. 
+
+Here we develop partial parsers and lexers for ABC Tunes, to develop ideas 
+and constraints.
+
+# A Slightly More Complex Example
+
+This lexer and parser accept a string of notes, with white space and other
+complexities, so it is one step more complex than the one we just developed.
+
+# Test Data
+```{r}
+arpeggios_1 <- "CEG2 CFA2 DGB2"
+
+arpeggios_2 <- "GBD2 GCE2 AD^F2"   # Add a Sharp
+
+arpeggios_3 <- "G_BD2 GC_E2 ADF2"   # Add two flats
+
+arpeggios_4 <- "GBd2 Gce2 Ad^f2"   # Add variation in octaves
+
+arpeggios_5 <- "GBD'2 GC'E'2 AD'^F'2"   # octave modifiers should produce same as last
+
+arpeggios_6 <- "g,b,d2 g,ce2 a,d^f2"   # octave modifiers should produce same as last
+
+arpeggios_7 <- "CEGz CFAz DGBx x4 Z2 " # Testing rests.
+```
+
+
+# A Simple Tune Lexer
+```{r}
+TOKENS = c('ACCIDENTALS', 'BASENOTE', 'OCTAVE_ADJ', 'DURATION', 'WHITESPACE')
+LITERALS = c()
+
+TestLexer <- R6::R6Class("Lexer",
+  public = list(
+    tokens = TOKENS,
+    literals = LITERALS,
+  
+    # The ABC standard allows multiple accidental markers, possibly mixed
+    t_ACCIDENTALS = '[\\^=_]+',
+    t_BASENOTE = "[a-gA-G]",
+    t_OCTAVE_ADJ = "[\\',]+",
+    
+    t_DURATION = function(re='[\\/]?\\d+', t) {
+         first <- substr(t$value, 1, 1)
+         if (first == '/') {
+           rest <- sub('.', '', t$value)  # strip first character
+           t$value <- 1 / strtoi(rest)    # Convert to integer and invert
+         } else {
+           t$value <- strtoi(t$value)
+         }
+         return(t)
+    },
+
+    t_WHITESPACE = "\\s+",
+    
+    # we Need a Function to Increment Line Numbers, to help withe fixing errors
+    t_newline = function(re='\\n+|(?:\\n\\r)+', t) {         
+      t$lexer$lineno <- t$lexer$lineno + nchar(t$value)
+      return(NULL)
+    },
+    
+    # define an error function for unrecognized tokens or characters,
+    # here we simply skip to teh next character and try again.
+    t_error = function(t) {
+      cat(sprintf("Illegal character '%s'", t$value[1]))
+      t$lexer$skip(1)
+      return(t)
+    
+    }
+  )
+)
+
+testlexer <- rly::lex(TestLexer)
+```
+
+
+We use a parser by feeding it some input (with the `$input()` method) then 
+pulling tokens out one at a time(with the `$token()` method).
+```{r}
+testlexer$input(arpeggios_1)
+while (!is.null(current_token <- testlexer$token())) {
+  print(current_token)
+}
+```
+
+
+
+# A Simple Tune Parser
+Next, we build a simple parser to take the output from a lexer and turn in into
+something more useful.  This parser builds on one developed in another 
+notebook.  The changes add code for tracking a few additional features of
+real music, including rests, slurs and ties.
+
+The other major change is use of an empty production to simplify coding 
+of optional components of hte standard.
+
+```{r}
+TestParser <- R6::R6Class("Parser",
+  public = list(
+    tokens = TOKENS,  # defined above!
+    literals = LITERALS,
+    # Parsing rules
+    
+    p_note_seq = function(doc = 'note_seq : note note_seq
+                                          | spaced_note note_seq', p) {
+        p$set(1, append(p$get(3), list(p$get(2)), after = 0))  # probably slow....
+    },
+    
+    p_note_seq_start = function(doc = 'note_seq : note
+                                                | spaced_note', p) {
+        p$set(1, list(p$get(2)))
+    },
+    
+    # the following could be folded back int onote, but eventually 
+    # we will want to handle this as a special case too...
+    p_spaced_note = function(doc = 'spaced_note : note WHITESPACE', p) {
+      p$set(1, p$get(2))
+    },
+    
+    p_note  = function(doc = 'note : note_dur
+                                   | note_oct
+                                   | note_acc
+                                   | basenote', p) {
+        p$set(1, p$get(2))
+    },
+    
+    # If the note has a duration specified, we need to add that now.
+    # we could be working with three possible precursors
+     p_note_duration  = function(doc = 'note_dur : note_oct DURATION
+                                                 | note_acc DURATION
+                                                 | basenote DURATION', p) {
+        note <- p$get(2)
+        note$duration <- p$get(3)
+        p$set(1, note)
+    },
+    
+    
+    # If we have octave adjustments, they are signaled after the basenote
+    # but now we need to recognize that we could be working with a bare
+    # basenote, or one modified by accidentals
+    p_note_oct = function(doc = 'note_oct : note_acc OCTAVE_ADJ
+                                          | basenote OCTAVE_ADJ', p) {
+        note <- p$get(2)
+        chars <- p$get(3)
+        chars <- strsplit(chars, '')[[1]]  # strsplit is vectorized
+        octave <- note$octave
+        for (n in seq_along(chars)) {
+          if (chars[n] == "'") {
+            octave = octave + 1
+          } else if (chars[n] == ',') {
+            octave = octave - 1
+          }
+        }
+        note$octave <- octave
+        p$set(1, note)
+    },
+    
+    
+    # If we have one or more accidentals, they come before the base note
+    # the ABC standard allows multiple accidentals
+    p_note_acc=  function(doc = 'note_acc : ACCIDENTALS basenote', p) {
+      note <- p$get(3)
+      chars <- p$get(2)
+      chars <- strsplit(chars, '')[[1]]  # strsplit is vectorized
+      accidental <- note$accidentals
+
+      for (n in seq_along(chars)) {
+        if (chars[n] == '^') {
+          accidental = accidental + 1
+        } else if (chars[n] == '_') {
+          accidental = accidental - 1
+        }
+      }
+      note$accidentals <- accidental
+      p$set(1, note)
+    },
+    
+    # we start with basenote, to create a new note data structure, which we modify
+    # as we add other components to determine true_pitch and pitch duration.
+    p_basenote    = function(doc = 'basenote : BASENOTE', p) {
+      char <- p$get(2)
+      if (char == toupper(char)) {
+        octave <- 4
+      } else {
+        octave <- 5
+      }
+      # create our note data structure
+      p$set(1, new_note(name = toupper(char), accidental = 0, 
+                        octave = octave, duration = 1))
+    },
+    
+    p_error = function(p) {
+      if(is.null(p)) cat("Syntax error at EOF")
+      else           cat(sprintf("Syntax error at '%s'", p$value))
+    }
+  )
+)
+testparser <- yacc(TestParser, debug = TRUE)
+
+```
+
+# Testing the Parser
+```{r}
+p <- testparser$parse(arpeggios_1, testlexer)
+p
+
+```
+
+It's not too hard to assemble that into a dataframe.  The only trick is that 
+we have to unclass the note objects. (Alternatively, we could define an 
+`as.data.frame.note()` function that does that for us).
+
+```{r}
+do.call(rbind, lapply(p, function(note) data.frame(unclass(note))))
+```
+
+Or  Flatten the list of notes to a vector representation of the strings, and show it.
+```{r}
+v <- vector(length = length(p))
+for (n in seq_along(p)) {
+  cat(format(p[[n]]))
+  cat('\n')
+}
+```
+
+```{r}
+p <- smallparser$parse(arpeggios_2, smalllexer)
+for (n in seq_along(p)) {
+  cat(format(p[[n]]))
+  cat('\n')
+}
+```
+
+```{r}
+p <- smallparser$parse(arpeggios_3, smalllexer)
+for (n in seq_along(p)) {
+  cat(format(p[[n]]))
+  cat('\n')
+}
+```
+
+```{r}
+p <- smallparser$parse(arpeggios_4, smalllexer)
+for (n in seq_along(p)) {
+  cat(format(p[[n]]))
+  cat('\n')
+}
+```
+
+```{r}
+p <- smallparser$parse(arpeggios_5, smalllexer)
+for (n in seq_along(p)) {
+  cat(format(p[[n]]))
+  cat('\n')
+}
+```
+
+```{r}
+p <- smallparser$parse(arpeggios_6, smalllexer)
+for (n in seq_along(p)) {
+  cat(format(p[[n]]))
+  cat('\n')
+}
+```
+
+
